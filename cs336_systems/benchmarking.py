@@ -11,31 +11,99 @@ import torch.nn as nn
 from torch import Tensor
 from jaxtyping import Float, Bool, Int
 from cs336_basics.model import BasicsTransformerLM
+
 import timeit
 import time
 
-def benchmark_model(model, data, n_steps, warmup_steps, hyperparameters, forward_only=False):
+def benchmark_model(module_model, hyperparameters, vocab_size, batch_size, context_length, forward_only=False):
     """
     Benchmark the model for n_steps steps.
     """
-    model = BasicsTransformerLM(**hyperparameters)
+    n_steps = 100
+    warmup_steps = 10
+    model = module_model(vocab_size, context_length, **hyperparameters, rope_theta=10000.0)
+    # generate random data
+    data = torch.randint(0, vocab_size, (batch_size, context_length))
+
+    
     for _ in range(warmup_steps):
         model(data)
     if torch.cuda.is_available():
         torch.cuda.synchronize()
 
     # timeit.default_timer()
-    times = []
+    forward_times = []
     for _ in range(n_steps):
         start_time = timeit.default_timer()
-        out = model(data)
-        if not forward_only:
-            out.backward()
+        model(data)
         if torch.cuda.is_available():
             torch.cuda.synchronize()
         end_time = timeit.default_timer()   
-        times.append(end_time - start_time)
+        forward_times.append(end_time - start_time)
+    mean_forward_time = sum(forward_times) / n_steps
+    mean_backward_time = None
 
-    mean_time = sum(times) / n_steps
+    if not forward_only:
+        backward_times = []
+        for _ in range(n_steps):
+            out = model(data)
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+            start_time = timeit.default_timer()
+            out.backward()
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+            end_time = timeit.default_timer()
+            backward_times.append(end_time - start_time)
+        mean_backward_time = sum(backward_times) / n_steps
 
-    return mean_time
+    return mean_forward_time, mean_backward_time
+
+if __name__ == "__main__":
+    vocab_size = 10000
+    batch_size = 4
+    context_length = 1024
+
+    hyperparameters ={
+        "small": {
+            "d_model": 768,
+            "d_ff": 3072,
+            "num_layers": 12,
+            "num_heads": 12,
+        },
+        "medium": {
+            "d_model": 1024,
+            "d_ff": 4096,
+            "num_layers": 24,
+            "num_heads": 16,
+            },
+        "large": {
+            "d_model": 1280,
+            "d_ff": 5120,
+            "num_layers": 36,
+            "num_heads": 20,
+        },
+        "xl": {
+            "d_model": 1600,
+            "d_ff": 6400,
+            "num_layers": 48,
+            "num_heads": 25,
+        },
+        "2.7B": {
+            "d_model": 2560,
+            "d_ff": 10240,
+            "num_layers": 32,
+            "num_heads": 32,
+        },
+    }
+    dic_timings = {}
+    for model_size, hyperparameters in hyperparameters.items():
+        print("Starting benchmark for model size: ", model_size)
+        forward_time, backward_time = benchmark_model(BasicsTransformerLM, hyperparameters, vocab_size, batch_size, context_length, forward_only=True)
+        dic_timings[model_size] = {
+            "forward_time": forward_time,
+            "backward_time": backward_time,
+        }
+        print("Benchmark for model size: ", model_size, " completed")
+        print("Forward time: ", forward_time, " seconds")
+        print("Backward time: ", backward_time, " seconds")
