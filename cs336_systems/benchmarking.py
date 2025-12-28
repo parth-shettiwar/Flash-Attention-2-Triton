@@ -19,8 +19,8 @@ def benchmark_model(module_model, hyperparameters, vocab_size, batch_size, conte
     """
     Benchmark the model for n_steps steps.
     """
-    n_steps = 100
-    warmup_steps = 10
+    n_steps = 10
+    warmup_steps = 5
     model = module_model(vocab_size, context_length, **hyperparameters, rope_theta=10000.0)
     # generate random data
     data = torch.randint(0, vocab_size, (batch_size, context_length))
@@ -40,29 +40,31 @@ def benchmark_model(module_model, hyperparameters, vocab_size, batch_size, conte
             torch.cuda.synchronize()
         end_time = timeit.default_timer()   
         forward_times.append(end_time - start_time)
-    mean_forward_time = sum(forward_times) / n_steps
-    mean_backward_time = None
 
+    backward_times = []
     if not forward_only:
-        backward_times = []
+        for _ in range(warmup_steps):
+            out = model(data)
+            out.mean().backward()
+
         for _ in range(n_steps):
             out = model(data)
+            back_out = out.mean()
             if torch.cuda.is_available():
                 torch.cuda.synchronize()
             start_time = timeit.default_timer()
-            out.backward()
+            back_out.backward()
             if torch.cuda.is_available():
                 torch.cuda.synchronize()
             end_time = timeit.default_timer()
             backward_times.append(end_time - start_time)
-        mean_backward_time = sum(backward_times) / n_steps
 
-    return mean_forward_time, mean_backward_time
+    return forward_times, backward_times
 
 if __name__ == "__main__":
     vocab_size = 10000
     batch_size = 4
-    context_length = 1024
+    context_length = 8
 
     hyperparameters ={
         "small": {
@@ -99,11 +101,20 @@ if __name__ == "__main__":
     dic_timings = {}
     for model_size, hyperparameters in hyperparameters.items():
         print("Starting benchmark for model size: ", model_size)
-        forward_time, backward_time = benchmark_model(BasicsTransformerLM, hyperparameters, vocab_size, batch_size, context_length, forward_only=True)
+        forward_time, backward_time = benchmark_model(BasicsTransformerLM, hyperparameters, vocab_size, batch_size, context_length, forward_only=False)
         dic_timings[model_size] = {
-            "forward_time": forward_time,
-            "backward_time": backward_time,
+            "forward_time": {
+                "avg_times": sum(forward_time) / len(forward_time),
+                "std_times": torch.std(torch.tensor(forward_time)).item(),
+            },
+            "backward_time": {
+                "avg_times": sum(backward_time) / len(backward_time),
+                "std_times": torch.std(torch.tensor(backward_time)).item(),
+            },
         }
         print("Benchmark for model size: ", model_size, " completed")
         print("Forward time: ", forward_time, " seconds")
         print("Backward time: ", backward_time, " seconds")
+    
+    with open("cs336_systems/outputs/benchmark_timings.json", "w") as f:
+        json.dump(dic_timings, f)
