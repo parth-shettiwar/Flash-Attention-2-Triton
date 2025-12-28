@@ -14,17 +14,22 @@ from cs336_basics.model import BasicsTransformerLM
 
 import timeit
 import time
+import matplotlib.pyplot as plt
+import numpy as np
+import torch.cuda.nvtx as nvtx
 
-def benchmark_model(module_model, hyperparameters, vocab_size, batch_size, context_length, forward_only=False):
+def benchmark_model(module_model, hyperparameters, vocab_size, batch_size, context_length, forward_only=False, warmup_exp=False, device="cuda"):
     """
     Benchmark the model for n_steps steps.
     """
-    n_steps = 10
-    warmup_steps = 5
+    n_steps = 1
+    warmup_steps = 5 if warmup_exp else 0
     model = module_model(vocab_size, context_length, **hyperparameters, rope_theta=10000.0)
     # generate random data
     data = torch.randint(0, vocab_size, (batch_size, context_length))
-
+    if device == "cuda":
+        data = data.to(device)
+        model = model.to(device)
     
     for _ in range(warmup_steps):
         model(data)
@@ -64,7 +69,7 @@ def benchmark_model(module_model, hyperparameters, vocab_size, batch_size, conte
 if __name__ == "__main__":
     vocab_size = 10000
     batch_size = 4
-    context_length = 8
+    context_length = 32
 
     hyperparameters ={
         "small": {
@@ -99,9 +104,10 @@ if __name__ == "__main__":
         },
     }
     dic_timings = {}
+    warmup_exp = False
     for model_size, hyperparameters in hyperparameters.items():
         print("Starting benchmark for model size: ", model_size)
-        forward_time, backward_time = benchmark_model(BasicsTransformerLM, hyperparameters, vocab_size, batch_size, context_length, forward_only=False)
+        forward_time, backward_time = benchmark_model(BasicsTransformerLM, hyperparameters, vocab_size, batch_size, context_length, forward_only=False, warmup_exp=warmup_exp)
         dic_timings[model_size] = {
             "forward_time": {
                 "avg_times": sum(forward_time) / len(forward_time),
@@ -115,6 +121,25 @@ if __name__ == "__main__":
         print("Benchmark for model size: ", model_size, " completed")
         print("Forward time: ", forward_time, " seconds")
         print("Backward time: ", backward_time, " seconds")
-    
-    with open("cs336_systems/outputs/benchmark_timings.json", "w") as f:
-        json.dump(dic_timings, f)
+    base_path = "cs336_systems/outputs"
+    file_name = "benchmark_timings.json" if warmup_exp else "benchmark_timings_no_warmup.json"
+    with open(os.path.join(base_path, file_name), "w") as f:
+        json.dump(dic_timings, f, indent=4)
+    # read the json file and plot
+    with open(os.path.join(base_path, file_name), "r") as f:
+        dic_timings = json.load(f)
+    for model_size, timings in dic_timings.items():
+        print(model_size)
+        print(timings)
+        print("Forward time: ", timings["forward_time"]["avg_times"], " seconds")
+        print("Backward time: ", timings["backward_time"]["avg_times"], " seconds")
+        print("Forward time std: ", timings["forward_time"]["std_times"], " seconds")
+        print("Backward time std: ", timings["backward_time"]["std_times"], " seconds")
+        print("--------------------------------")
+    # plot the forward and backward times for each model size
+    plt.figure(figsize=(10, 5))
+    plt.plot(dic_timings.keys(), [timings["forward_time"]["avg_times"] for timings in dic_timings.values()], label="Forward time")
+    plt.plot(dic_timings.keys(), [timings["backward_time"]["avg_times"] for timings in dic_timings.values()], label="Backward time")
+    plt.legend()
+    # save the plot
+    plt.savefig(os.path.join(base_path, file_name.replace(".json", ".png")))
