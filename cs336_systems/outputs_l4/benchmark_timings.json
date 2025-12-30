@@ -1,0 +1,42 @@
+{
+    "small": {
+        "forward_time": {
+            "avg_times": 0.03704877400000441,
+            "std_times": 0.0006450790097005665
+        },
+        "backward_time": {
+            "avg_times": 0.04029587080003694,
+            "std_times": 0.003024144796654582
+        }
+    },
+    "medium": {
+        "forward_time": {
+            "avg_times": 0.07559138020005776,
+            "std_times": 0.0015581457410007715
+        },
+        "backward_time": {
+            "avg_times": 0.0808678819999841,
+            "std_times": 0.00275145610794425
+        }
+    },
+    "large": {
+        "forward_time": {
+            "avg_times": 0.11359295890010798,
+            "std_times": 0.0023905588313937187
+        },
+        "backward_time": {
+            "avg_times": 0.12591393229999995,
+            "std_times": 0.0026581198908388615
+        }
+    },
+    "xl": {
+        "forward_time": {
+            "avg_times": 0.1537087647999215,
+            "std_times": 0.0020517378579825163
+        },
+        "backward_time": {
+            "avg_times": 0.24088281869999265,
+            "std_times": 0.0024914692621678114
+        }
+    }
+}

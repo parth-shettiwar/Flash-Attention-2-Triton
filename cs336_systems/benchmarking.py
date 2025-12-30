@@ -3,6 +3,7 @@ import json
 import logging
 import math
 import os
+import sys
 from einops import rearrange, einsum
 import einx
 
@@ -10,15 +11,45 @@ import torch
 import torch.nn as nn
 from torch import Tensor
 from jaxtyping import Float, Bool, Int
-from cs336_basics.model import BasicsTransformerLM
+
 
 import timeit
 import time
 import matplotlib.pyplot as plt
 import numpy as np
 import torch.cuda.nvtx as nvtx
-from cs336_basics.optimizer import AdamW
+
 import argparse
+import gc
+import importlib.util
+import importlib.machinery
+
+USE_MY_IMPLEMENTATION = True
+if not USE_MY_IMPLEMENTATION:
+    from cs336_basics.model import BasicsTransformerLM
+    from cs336_basics.optimizer import AdamW
+else:
+    # Load BPETokenizerTransformer/cs336_basics as a package explicitly to avoid conflicts
+    pkg_root = "/teamspace/studios/this_studio/Flash-Attention-2-Triton/BPETokenizerTransformer/cs336_basics"
+    if "cs336_basics" not in sys.modules:
+        pkg_spec = importlib.machinery.ModuleSpec("cs336_basics", loader=None, is_package=True)
+        pkg_module = importlib.util.module_from_spec(pkg_spec)
+        pkg_module.__path__ = [pkg_root]
+        sys.modules["cs336_basics"] = pkg_module
+
+    # Load transformer
+    spec_t = importlib.util.spec_from_file_location("cs336_basics.transformer", f"{pkg_root}/transformer.py")
+    mod_t = importlib.util.module_from_spec(spec_t)
+    spec_t.loader.exec_module(mod_t)
+    sys.modules["cs336_basics.transformer"] = mod_t
+    mymodel = mod_t.TransformerLM
+
+    # Load optimizer
+    spec_o = importlib.util.spec_from_file_location("cs336_basics.train_transformer", f"{pkg_root}/train_transformer.py")
+    mod_o = importlib.util.module_from_spec(spec_o)
+    spec_o.loader.exec_module(mod_o)
+    sys.modules["cs336_basics.train_transformer"] = mod_o
+    myoptimizer = mod_o.AdamW
 
 def benchmark_model(module_model, hyperparameters, vocab_size, batch_size, context_length, forward_only=False, warmup_exp=False, device="cuda"):
     """
@@ -37,6 +68,7 @@ def benchmark_model(module_model, hyperparameters, vocab_size, batch_size, conte
         loss = model(data).mean()
         if not forward_only:
             loss.backward()
+            model.zero_grad() 
 
     # timeit.default_timer()
     forward_times = []
@@ -59,11 +91,16 @@ def benchmark_model(module_model, hyperparameters, vocab_size, batch_size, conte
             if torch.cuda.is_available():
                 torch.cuda.synchronize()
             end_time_backward = timeit.default_timer()
+            model.zero_grad() 
             backward_times.append(end_time_backward - start_time_backward)
 
+    # clear cuda memory
+    del model, data, loss
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
     return forward_times, backward_times
 
-def profile_model(module_model, model_name, hyperparameters, vocab_size, batch_size, context_length, warmup_exp=False, device="cuda"):
+def profile_model(module_model, model_name, hyperparameters, vocab_size, batch_size, context_length, forward_only=False, warmup_exp=True, device="cuda", use_myimplementation=False):
     """
     Profile the model for n_steps steps.
     
@@ -73,16 +110,20 @@ def profile_model(module_model, model_name, hyperparameters, vocab_size, batch_s
     n_steps = 10
     model = module_model(vocab_size, context_length, **hyperparameters, rope_theta=10000.0)
     data = torch.randint(0, vocab_size, (batch_size, context_length))
-    optimizer = AdamW(model.parameters(), lr=1e-4)
+    if use_myimplementation:
+        optimizer = myoptimizer(model.parameters(), lr=1e-4)
+    else:
+        optimizer = AdamW(model.parameters(), lr=1e-4)
     if device == "cuda":
         data = data.to(device)
         model = model.to(device)
     warmup_steps = 5 if warmup_exp else 0
     for _ in range(warmup_steps):
         loss = model(data).mean()
-        optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
+        if not forward_only:
+            loss.backward()
+            optimizer.step()
+            optimizer.zero_grad()
     
     torch.cuda.synchronize()
     
@@ -97,16 +138,18 @@ def profile_model(module_model, model_name, hyperparameters, vocab_size, batch_s
         torch.cuda.synchronize()
         nvtx.range_pop()
 
-        nvtx.range_push("Backward")
-        loss.backward()
-        torch.cuda.synchronize()
-        nvtx.range_pop()    
+        if not forward_only:
+            nvtx.range_push("Backward")
+            loss.backward()
+            torch.cuda.synchronize()
+            nvtx.range_pop()    
 
-        nvtx.range_push("Optimizer Step")
-        optimizer.step()
-        optimizer.zero_grad()
-        torch.cuda.synchronize()
-        nvtx.range_pop()
+        if not forward_only:
+            nvtx.range_push("Optimizer Step")
+            optimizer.step()
+            optimizer.zero_grad()
+            torch.cuda.synchronize()
+            nvtx.range_pop()
         
         nvtx.range_pop()  # End step
 
@@ -142,12 +185,12 @@ if __name__ == "__main__":
             "num_layers": 48,
             "num_heads": 25,
         },
-        "2.7B": {
-            "d_model": 2560,
-            "d_ff": 10240,
-            "num_layers": 32,
-            "num_heads": 32,
-        },
+        # "2.7B": {
+        #     "d_model": 2560,
+        #     "d_ff": 10240,
+        #     "num_layers": 32,
+        #     "num_heads": 32,
+        # },
     }
 
     # benchmark the model
@@ -169,7 +212,11 @@ if __name__ == "__main__":
     #     print("Benchmark for model size: ", model_size, " completed")
     #     print("Forward time: ", forward_time, " seconds")
     #     print("Backward time: ", backward_time, " seconds")
-    # base_path = "cs336_systems/outputs"
+    #     if torch.cuda.is_available():
+    #         gc.collect()
+    #         torch.cuda.empty_cache()
+
+    # base_path = "cs336_systems/outputs_l4"
     # file_name = "benchmark_timings.json" if warmup_exp else "benchmark_timings_no_warmup.json"
     # with open(os.path.join(base_path, file_name), "w") as f:
     #     json.dump(dic_timings, f, indent=4)
@@ -196,12 +243,27 @@ if __name__ == "__main__":
 
     # profile the model
     # capture command line arguement for model size
+    # parser = argparse.ArgumentParser()
+    # parser.add_argument("--model", type=str, default="small")
+    # parser.add_argument("--forward_only", action="store_true")
+    # args = parser.parse_args()
+    # model_size = args.model
+    # forward_only = args.forward_only
+    # hyperparameters = hyperparameters[model_size]
+    # print("Starting profiling for model size: ", model_size)
+    # profile_model(BasicsTransformerLM, model_size, hyperparameters, vocab_size, batch_size, context_length, forward_only=forward_only, warmup_exp=True)
+    # print("Profiling for model size: ", model_size, " completed")
+    # print("--------------------------------")
+
+    # do on mymodel
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", type=str, default="small")
+    parser.add_argument("--forward_only", action="store_true")
     args = parser.parse_args()
     model_size = args.model
+    forward_only = args.forward_only
     hyperparameters = hyperparameters[model_size]
     print("Starting profiling for model size: ", model_size)
-    profile_model(BasicsTransformerLM, model_size, hyperparameters, vocab_size, batch_size, context_length, warmup_exp=True)
+    profile_model(mymodel, model_size, hyperparameters, vocab_size, batch_size, context_length, forward_only=forward_only, warmup_exp=True, use_myimplementation=USE_MY_IMPLEMENTATION)
     print("Profiling for model size: ", model_size, " completed")
     print("--------------------------------")
